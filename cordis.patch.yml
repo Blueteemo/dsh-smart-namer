@@ -1,0 +1,5 @@
+# dsh-smart-namer bundle layer: inserts the Host + Client plugin row.
+# The row id stays stable so profile patches can target it.
+- insert:
+    - id: dsh-smart-namer
+      name: 'dsh-smart-namer'

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "智能命名",
+    "description": "根据会话或工作区的实际内容生成候选短名，选中即改名；支持 /rename 命令、工作区下拉选择，另提供 rename_target 工具供 Agent 直接改名。"
+  }
+}

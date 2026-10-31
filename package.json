@@ -1,0 +1,60 @@
+{
+  "name": "dsh-smart-namer",
+  "version": "1.0.0",
+  "description": "Smart naming for DeepSeek Harness sessions and workspaces: three short Chinese names from the item's own content, one click to rename.",
+  "type": "module",
+  "license": "MIT",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "assets/",
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "test/",
+    "docs/"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "session",
+    "workspace",
+    "rename",
+    "naming"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": []
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Blueteemo/dsh-smart-namer.git"
+  },
+  "homepage": "https://github.com/Blueteemo/dsh-smart-namer#readme",
+  "bugs": {
+    "url": "https://github.com/Blueteemo/dsh-smart-namer/issues"
+  },
+  "author": "Blueteemo",
+  "icon": "./icon.svg"
+}

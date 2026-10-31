@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Smart Namer",
+    "description": "Suggests short name candidates from a session's or workspace's own content; pick one to rename. Ships a /rename command, a workspace picker, and a rename_target tool for agents."
+  }
+}
