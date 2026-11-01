@@ -2,7 +2,15 @@
 
 ## 1.0.0 — 2026-10-31
 
-首个稳定版本。
+首个稳定版本，2026-11-01 发布到 npm。
+
+安装方式（任选其一）：
+
+```sh
+dsh plugin --profile desktop add dsh-smart-namer                                    # npm
+dsh plugin --profile desktop add github:Blueteemo/dsh-smart-namer                   # 源码
+dsh plugin --profile desktop add https://github.com/Blueteemo/dsh-smart-namer/releases/latest/download/dsh-smart-namer.tgz   # 预构建包
+```
 
 ### 功能
 

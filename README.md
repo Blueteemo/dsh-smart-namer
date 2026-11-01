@@ -6,11 +6,19 @@
 
 只使用 DSH 公开接口，不修改宿主安装目录。
 
+[![npm](https://img.shields.io/npm/v/dsh-smart-namer.svg)](https://www.npmjs.com/package/dsh-smart-namer) [![license](https://img.shields.io/npm/l/dsh-smart-namer.svg)](LICENSE)
+
 [中文](README.md) · [English](README.en.md)
 
 ## 安装
 
-从 GitHub：
+从 npm（推荐，预构建，免构建授权）：
+
+```bash
+dsh plugin --profile desktop add dsh-smart-namer
+```
+
+从 GitHub（最新源码）：
 
 ```bash
 dsh plugin --profile desktop add github:Blueteemo/dsh-smart-namer
@@ -20,6 +28,12 @@ dsh plugin --profile desktop add github:Blueteemo/dsh-smart-namer
 
 ```bash
 dsh plugin --profile desktop add file:/absolute/path/to/dsh-smart-namer
+```
+
+也可以直接用预构建包：
+
+```bash
+dsh plugin --profile desktop add https://github.com/Blueteemo/dsh-smart-namer/releases/latest/download/dsh-smart-namer.tgz
 ```
 
 安装后如果侧栏没有出现入口，**完全退出 App（Cmd+Q）再打开**。客户端 bundle 有 immutable 缓存和宿主内存 memoize，刷新页面（包括硬刷新）不会重新加载客户端代码。

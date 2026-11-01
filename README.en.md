@@ -6,11 +6,19 @@ Adds smart naming to the DSH sidebar: the model reads a session's or workspace's
 
 Only public DSH APIs are used; the host installation is never modified.
 
+[![npm](https://img.shields.io/npm/v/dsh-smart-namer.svg)](https://www.npmjs.com/package/dsh-smart-namer) [![license](https://img.shields.io/npm/l/dsh-smart-namer.svg)](LICENSE)
+
 [中文](README.md) · [English](README.en.md)
 
 ## Install
 
-From GitHub:
+From npm (recommended — prebuilt, no build approval):
+
+```bash
+dsh plugin --profile desktop add dsh-smart-namer
+```
+
+From GitHub (latest source):
 
 ```bash
 dsh plugin --profile desktop add github:Blueteemo/dsh-smart-namer
@@ -20,6 +28,12 @@ From a local checkout (development):
 
 ```bash
 dsh plugin --profile desktop add file:/absolute/path/to/dsh-smart-namer
+```
+
+Or use the prebuilt tarball:
+
+```bash
+dsh plugin --profile desktop add https://github.com/Blueteemo/dsh-smart-namer/releases/latest/download/dsh-smart-namer.tgz
 ```
 
 If the sidebar entry does not appear, **quit the app completely (Cmd+Q) and reopen it**. The client bundle is served with an immutable cache and memoized in the host, so refreshing the page does not reload client code.
