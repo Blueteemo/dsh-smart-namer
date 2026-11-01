@@ -14,9 +14,14 @@ import { join } from 'node:path'
 const NAME = 'dsh-smart-namer'
 const ROUTE = '/__dsh-smart-name/suggest'
 const PROMPT_ROUTE = '/__dsh-smart-name/prompts'
+const MODELS_ROUTE = '/__dsh-smart-name/models'
+const MODELS_FILE = 'dsh-smart-namer.models.json'
 const PROMPT_FILE = 'dsh-smart-namer.prompts.json'
 const MAX_PROMPT_CHARS = 8000
-const TIMEOUT_MS = 4000
+// Reasoning models on third-party providers can take several seconds; a 4s
+// budget made naming fail intermittently depending on which model the profile
+// pointed at.
+const TIMEOUT_MS = 20000
 const MATERIAL_CHARS = 200
 const MAX_NAMES = 3
 const LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
@@ -324,6 +329,47 @@ function pickSurfaceTexts(events) {
   }
 }
 
+/**
+ * The model a session last ran with, as recorded in its own event stream.
+ * `request/header` is written for every request and is the authoritative record;
+ * `model/selection` only appears when someone switches the model by hand, so it
+ * serves as a fallback for sessions that never made a request yet.
+ */
+function selectionFromEvents(events) {
+  const list = Array.isArray(events) ? events : []
+  const read = (types) => {
+    for (let index = list.length - 1; index >= 0; index -= 1) {
+      const event = list[index]
+      if (!types.includes(event?.type)) continue
+      const data = event.data ?? {}
+      // `request/header` nests the selection under header.config; the simpler
+      // `model/selection` event carries it at the top level.
+      const config = data.header?.config ?? data
+      if (typeof config.provider === 'string' && typeof config.model === 'string') {
+        return {
+          provider: config.provider,
+          model: config.model,
+          ...(typeof config.reasoningEffort === 'string' ? { reasoningEffort: config.reasoningEffort } : {}),
+        }
+      }
+    }
+    return null
+  }
+  const fromHeader = read(['request/header']) ?? read(['model/selection'])
+  if (fromHeader) return fromHeader
+  // Sessions that never logged a header still carry the model on every assistant
+  // message, which is enough to name them with the same model.
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const event = list[index]
+    if (event?.type !== 'assistant/message') continue
+    const source = event.data?.message?.source ?? {}
+    if (typeof source.provider === 'string' && typeof source.model === 'string') {
+      return { provider: source.provider, model: source.model }
+    }
+  }
+  return null
+}
+
 async function readSessionMaterial(ctx, sessionId, signal) {
   const query = ctx.get('sessionQuery')
   if (!query) throw new Error('session-query-unavailable')
@@ -354,7 +400,19 @@ async function readSessionMaterial(ctx, sessionId, signal) {
   } catch {
     project = ''
   }
-  return { title, first, lastUser, last, samples, project, codes }
+  // `readSurface` only exposes the projected surface, which drops the
+  // per-request header that records which model the session actually ran with.
+  // The full log still has it, so consult that before falling back.
+  let selection = selectionFromEvents(surface?.events)
+  if (!selection) {
+    try {
+      const full = await query.readSession(sessionId)
+      selection = selectionFromEvents(full?.events)
+    } catch {
+      /* keep the caller's fallback */
+    }
+  }
+  return { title, first, lastUser, last, samples, project, codes, selection }
 }
 
 async function readWorkspaceMaterial(ctx, workspaceId, signal) {
@@ -415,6 +473,41 @@ function profileDir(ctx) {
 }
 
 /** Read the saved prompt overrides; an unreadable file means "use the defaults". */
+/**
+ * Per-entry-point model choice:
+ *   session   'follow' (use the model the session last ran with) | 'default' | 'provider/model'
+ *   workspace 'default' | 'provider/model'
+ * Stored next to the prompt overrides so both live in the profile directory.
+ */
+function loadModelConfig(ctx) {
+  const dir = profileDir(ctx)
+  const empty = { session: 'follow', workspace: 'default' }
+  if (dir === '') return empty
+  try {
+    const parsed = JSON.parse(readFileSync(join(dir, MODELS_FILE), 'utf8'))
+    return {
+      session: typeof parsed?.session === 'string' && parsed.session !== '' ? parsed.session : 'follow',
+      workspace: typeof parsed?.workspace === 'string' && parsed.workspace !== '' ? parsed.workspace : 'default',
+    }
+  } catch {
+    return empty
+  }
+}
+
+function saveModelConfig(ctx, next) {
+  const dir = profileDir(ctx)
+  if (dir === '') throw new Error('profile-unavailable')
+  writeFileSync(join(dir, MODELS_FILE), JSON.stringify(next, null, 2), 'utf8')
+}
+
+/** Split a stored 'provider/model' string; anything else means "no explicit pick". */
+function parseModelValue(value) {
+  if (typeof value !== 'string') return null
+  const slash = value.indexOf('/')
+  if (slash <= 0 || slash === value.length - 1) return null
+  return { provider: value.slice(0, slash), model: value.slice(slash + 1) }
+}
+
 function loadPromptOverrides(ctx) {
   const dir = profileDir(ctx)
   if (dir === '') return { session: '', workspace: '' }
@@ -437,42 +530,103 @@ function savePromptOverrides(ctx, next) {
 }
 
 /** Consume one non-streaming-for-the-user model call and return its text. */
-async function completeOnce(ctx, prompt, signal) {
+/**
+ * Some providers reject `reasoningEffort: 'off'` outright. Remember the verdict
+ * per model — a global flag would let one provider's limitation leak onto every
+ * other model, which silently costs them the token-saving request.
+ */
+const effortRejects = new Set()
+
+/**
+ * Pick the model to name with. A session that is already running has its own
+ * selection (the one its prompt assembly uses); naming should follow that
+ * session, not the profile default, which may point at a different provider.
+ */
+/**
+ * Decide the model for one naming call:
+ *   explicit setting wins; for sessions the recorded model comes next (when the
+ *   setting is 'follow'); the profile default is the last resort.
+ */
+function resolveConfiguredSelection(ctx, sessionId, recorded) {
+  const config = loadModelConfig(ctx)
+  const key = sessionId ? 'session' : 'workspace'
+  const stored = config[key]
+  if (stored === 'default') return ctx.get('agentDefaultModel')?.currentSelection?.()
+  const explicit = parseModelValue(stored)
+  if (explicit) return explicit
+  if (key === 'session' && recorded?.provider && recorded?.model) return recorded
+  if (recorded?.provider && recorded?.model) return recorded
+  return resolveSelection(ctx, sessionId)
+}
+
+function resolveSelection(ctx, sessionId) {
+  const fallback = ctx.get('agentDefaultModel')?.currentSelection?.()
+  if (!sessionId) return fallback
+  try {
+    const live = ctx.get('sessions')?.get?.(sessionId)
+    if (!live) return fallback
+    const selection = ctx.get('sessionController')?.selectionFor?.(live.agent ?? live)?.current
+    if (selection?.provider && selection?.model) return selection
+  } catch {
+    /* fall through to the profile default */
+  }
+  return fallback
+}
+
+async function completeOnce(ctx, prompt, signal, sessionId, preferred) {
   const llm = ctx.get('llm')
   if (!llm) throw new Error('llm-unavailable')
-  const selection = ctx.get('agentDefaultModel')?.currentSelection?.()
+  const selection = resolveConfiguredSelection(ctx, sessionId, preferred)
   if (!selection?.provider || !selection?.model) throw new Error('model-unavailable')
 
-  const chunks = new Map()
-  let finish
-  const stream = llm.stream({
-    provider: selection.provider,
-    model: selection.model,
-    messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
-    temperature: 0.3,
-    maxTokens: 120,
-    // Naming is a short copywriting task. The profile's default effort is high,
-    // which spends the whole 120-token budget on reasoning before any name.
-    // "off" keeps the same model and still leaves room for three short lines.
-    reasoningEffort: 'off',
-    signal,
-  })
-  for await (const chunk of stream) {
-    if (chunk.type === 'text-delta') {
-      chunks.set(chunk.index, (chunks.get(chunk.index) ?? '') + chunk.text)
-    } else if (chunk.type === 'block-end' && chunk.block?.type === 'text' && !chunks.has(chunk.index)) {
-      chunks.set(chunk.index, chunk.block.text)
-    } else if (chunk.type === 'finish') {
-      finish = chunk.reason
+  const run = async ({ effort, maxTokens }) => {
+    const chunks = new Map()
+    let finish
+    const request = {
+      provider: selection.provider,
+      model: selection.model,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      temperature: 0.3,
+      maxTokens,
+      signal,
+    }
+    if (effort !== undefined) request.reasoningEffort = effort
+    const stream = llm.stream(request)
+    for await (const chunk of stream) {
+      if (chunk.type === 'text-delta') {
+        chunks.set(chunk.index, (chunks.get(chunk.index) ?? '') + chunk.text)
+      } else if (chunk.type === 'block-end' && chunk.block?.type === 'text' && !chunks.has(chunk.index)) {
+        chunks.set(chunk.index, chunk.block.text)
+      } else if (chunk.type === 'finish') {
+        finish = chunk.reason
+      }
+    }
+    if (finish?.kind === 'error' || finish?.kind === 'aborted') {
+      throw new Error(finish.failure?.message || 'model-error')
+    }
+    const text = [...chunks.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, text]) => text)
+      .join('')
+    return text
+  }
+
+  // Naming is a short copywriting task: "off" keeps the whole 120-token budget
+  // for the names themselves. Models that reject it fall back to their own
+  // default effort with a larger budget, otherwise reasoning eats every token.
+  const effortKey = `${selection.provider}/${selection.model}`
+  if (!effortRejects.has(effortKey)) {
+    try {
+      return await run({ effort: 'off', maxTokens: 120 })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      if (!/reasoning effort/i.test(message)) throw error
+      effortRejects.add(effortKey)
     }
   }
-  if (finish?.kind === 'error' || finish?.kind === 'aborted') {
-    throw new Error(finish.failure?.message || 'model-error')
-  }
-  return [...chunks.entries()]
-    .sort(([left], [right]) => left - right)
-    .map(([, text]) => text)
-    .join('')
+  // Without 'off' the model may reason first, so leave room for both the
+  // reasoning and the four short lines.
+  return await run({ effort: undefined, maxTokens: 2000 })
 }
 
 async function suggestNames(ctx, kind, id, signal, hint = '') {
@@ -489,7 +643,7 @@ async function suggestNames(ctx, kind, id, signal, hint = '') {
         : `- ${material.first || '（无）'}`,
       last_assistant_text: material.last || '（无）',
     })
-    const raw = await completeOnce(ctx, prompt + extra, signal)
+    const raw = await completeOnce(ctx, prompt + extra, signal, kind === 'session' ? id : undefined, material.selection)
     const names = parseNames(raw, material.title)
     if (names.length === 0) throw new Error('no-candidates')
     return names
@@ -504,7 +658,7 @@ async function suggestNames(ctx, kind, id, signal, hint = '') {
       titles: material.titles.length > 0 ? material.titles.map((title) => `- ${title}`).join('\n') : '（无）',
       first_user_message: material.first || '（无）',
     })
-    const raw = await completeOnce(ctx, prompt + extra, signal)
+    const raw = await completeOnce(ctx, prompt + extra, signal, kind === 'session' ? id : undefined, material.selection)
     const names = parseNames(raw, material.title)
     if (names.length === 0) throw new Error('no-candidates')
     return names
@@ -661,6 +815,72 @@ function registerHttp(ctx, host) {
   }))
 }
 
+/** Collect every model the host knows about, for the config pickers. */
+async function listModelOptions(ctx) {
+  const llm = ctx.get('llm')
+  if (!llm?.listProviders || !llm?.listModels) return []
+  const providers = llm.listProviders() ?? []
+  const options = []
+  for (const provider of providers) {
+    const id = provider?.id
+    if (typeof id !== 'string' || id === '') continue
+    let models = []
+    try {
+      // listModels takes the provider id string, not the provider record.
+      models = (await llm.listModels(id)) ?? []
+    } catch {
+      models = []
+    }
+    for (const model of models) {
+      const modelId = typeof model === 'string' ? model : model?.id
+      if (typeof modelId !== 'string' || modelId === '') continue
+      const name = typeof model === 'object' && typeof model?.name === 'string' ? model.name : modelId
+      options.push({ value: `${id}/${modelId}`, provider: id, model: modelId, label: `${name} · ${id}` })
+    }
+  }
+  return options
+}
+
+function registerModelsRoute(ctx, host) {
+  const origin = new URL(host.getOrigin())
+  const expectedPort = origin.port || (origin.protocol === 'https:' ? '443' : '80')
+  ctx.effect(() => host.register({
+    kind: 'exact',
+    path: MODELS_ROUTE,
+    handler: async (req, res) => {
+      if (!requestAllowed(req, expectedPort)) {
+        sendJson(res, 403, { ok: false, error: 'forbidden' })
+        return
+      }
+      if (req.method === 'GET') {
+        sendJson(res, 200, { ok: true, config: loadModelConfig(ctx), options: await listModelOptions(ctx) })
+        return
+      }
+      if (req.method !== 'POST') {
+        sendJson(res, 405, { ok: false, error: 'method-not-allowed' })
+        return
+      }
+      let body
+      try {
+        body = await readJson(req)
+      } catch {
+        sendJson(res, 400, { ok: false, error: 'bad-request' })
+        return
+      }
+      const text = (value, fallback) => (typeof value === 'string' && value.trim() !== '' ? value.trim().slice(0, 200) : fallback)
+      try {
+        saveModelConfig(ctx, {
+          session: text(body?.session, 'follow'),
+          workspace: text(body?.workspace, 'default'),
+        })
+        sendJson(res, 200, { ok: true })
+      } catch (error) {
+        sendJson(res, 200, { ok: false, error: error?.message || 'save-failed' })
+      }
+    },
+  }))
+}
+
 function registerPromptRoute(ctx, host) {
   const origin = new URL(host.getOrigin())
   const expectedPort = origin.port || (origin.protocol === 'https:' ? '443' : '80')
@@ -736,6 +956,7 @@ function apply(ctx) {
   ctx.inject(['webServer'], (child) => {
     registerHttp(child, child.webServer)
     registerPromptRoute(child, child.webServer)
+    registerModelsRoute(child, child.webServer)
   })
   ctx.inject(['tools'], (child) => registerTool(child, child.tools))
   ctx.inject(['commands'], (child) => registerRenameCommand(child, child.commands))

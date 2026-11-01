@@ -1,6 +1,6 @@
 {
   "name": "dsh-smart-namer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Smart naming for DeepSeek Harness sessions and workspaces: three short Chinese names from the item's own content, one click to rename.",
   "type": "module",
   "license": "MIT",

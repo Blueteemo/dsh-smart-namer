@@ -58,29 +58,21 @@ Type `/rename` in the composer:
 
 - `/rename` — asks the model, applies the first candidate, replies `Renamed to "X". Alternatives: A, B`
 - `/rename emphasise the tooling` — the text becomes a **preference hint** for the model; the model still generates the names
-- If the model fails or returns nothing: `Couldn't think of a better name; left unchanged`
+- If a call fails it says why — too slow, model service error (with the upstream message), or no usable name came back — and leaves the title unchanged
 - On a session with no messages yet: `This session has no content yet — say a few things first.`
 
-## Development
+## What it reads
 
-```sh
-node --check index.js && node --check client.js   # syntax
-node --test test/*.test.mjs                       # unit tests (Node.js >= 22)
-```
+| Target | Material |
+|---|---|
+| **Session** | Existing title, owning project, project codes, and 5 user messages sampled evenly across the conversation |
+| **Workspace** | Decoded folder name, codes, the 5 most recent session titles, and the latest user message |
 
-`index.js` exports `apply`, `fill`, `parseNames` and `tidyName` for tests.
+Tool output, file contents and full logs are never read — what goes to the model is exactly the text above.
 
-`client.js` is the browser bundle: the host caches it per `?rev=` and memoizes it in memory, so **changes require quitting the app (Cmd+Q)** — a page refresh is not enough.
+Naming uses the session's own model by default; a workspace has no model of its own, so it uses the profile default. Both can be changed on the plugin page (next section). One call, 20 second timeout, never streamed to the user; failures say whether the model was too slow, the model service errored (with the upstream message), or no usable name came back.
 
-### Manual checks
-
-1. Say something, then Smart rename: candidates within 4 seconds, picking one renames
-2. Smart rename on an empty session: says there is no content — **not** a red error
-3. Rename a session and a workspace, restart the app, names persist
-4. Offline or model error: only a notice, no rename
-5. Check both dark and light themes
-
-## Custom prompts
+## Custom prompts and models
 
 The plugin page (Settings → Plugins → dsh-smart-namer → Configure) lets you edit both prompt templates:
 
@@ -88,33 +80,15 @@ The plugin page (Settings → Plugins → dsh-smart-namer → Configure) lets yo
 - **Reset to default** clears the saved value, falling back to the built-in template
 - **Save** applies immediately — no restart needed
 
-Overrides live in `~/.dsh/profiles/<profile>/dsh-smart-namer.prompts.json`. Placeholders: `{title}`, `{project}`, `{codes}`, `{user_samples}`, `{last_assistant_text}` for sessions; `{folder}`, `{codes}`, `{titles}`, `{first}` for workspaces.
-
 ## Agent tool
 
 `rename_target` renames directly, without calling the model:
 
 ```json
-{ "kind": "session", "id": "session-…", "title": "New title" }
+{ "kind": "session", "id": "session-...", "title": "New title" }
 ```
 
-`kind` is `session` or `workspace`. Session renames go through `sessionController.rename`; workspace renames go through `workspaceController.rename` (validating non-empty and uniqueness).
-
-## Context and model
-
-Session material: current title, owning project, available project codes, and 5 user messages sampled evenly across the conversation.
-
-Workspace material: the decoded folder name, codes, the most recent session titles, and the first message.
-
-Tool output, file contents and full logs are never read. Renaming uses the profile's default model; no API keys are stored in this plugin.
-
-## What it does not do
-
-No automatic naming, no batch mode, no caching, no retries, no multi-tier context, no local heuristics cleanup, no "think again", no history.
-
-## Verification
-
-Measured on DSH 0.2.1-rc.5 with profile `desktop`: candidates in about a second, sidebar updates on rename, 8 unit tests passing. Full record (origin checks, persistence locations, failure paths) in [docs/verification.md](docs/verification.md).
+`kind` is `session` or `workspace`. Session renames go through `sessionController.rename`; workspace renames through `workspaceController.rename` (validating non-empty and uniqueness).
 
 ## Screenshots
 
@@ -142,19 +116,7 @@ Renamed toast:
 
 ![rename command](docs/rename-command.png)
 
-## Structure
-
-```
-dsh-smart-namer/
-├── index.js            # Host: /rename command, HTTP /suggest, rename_target tool, model calls
-├── client.js           # Client: two menu entries, workspace dialog, toast
-├── cordis.patch.yml    # plugin row
-├── package.json        # npm package + dsh.bundle + dsh.client
-├── locale/{zh,en}.json # labels shown by the plugin manager
-├── test/               # unit tests (node --test)
-├── icon.svg            # plugin icon (assets/ holds a 180px bitmap)
-└── docs/               # screenshots + verification log
-```
+Contributor notes (tests, layout, release steps) live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

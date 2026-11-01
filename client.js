@@ -19,9 +19,11 @@ window.__ModuleLoader__.load({
     const OVERLAY_ID = 'dsh-smart-namer-overlay'
     const ROUTE = '/__dsh-smart-name/suggest'
     const PROMPT_ROUTE = '/__dsh-smart-name/prompts'
+    const MODELS_ROUTE = '/__dsh-smart-name/models'
     const CONFIG_SLOT = 'plugins.row.config'
     const CONFIG_KEY = 'dsh-smart-namer#dsh-smart-namer'
-    const TIMEOUT_MS = 4000
+    // Slightly above the host budget so the server's own error wins the race.
+    const TIMEOUT_MS = 21000
 
     const zh = {
       'menu.session': '智能重命名',
@@ -31,12 +33,20 @@ window.__ModuleLoader__.load({
       'dialog.workspaceLabel': '工作区',
       'dialog.thinking': '正在想…',
       'dialog.noIdea': '没想出更好的',
+      'dialog.timeout': '模型响应太慢，稍后再试',
+      'dialog.modelError': '模型服务异常',
       'dialog.renaming': '正在改名…',
       'dialog.renameFailed': '改名失败，请再试一次',
       'dialog.close': '关闭',
       'dialog.untitledSession': '未命名会话',
       'dialog.untitledWorkspace': '未命名工作区',
       'toast.renamed': '已改为 ',
+      'config.models': '命名使用的模型',
+      'config.sessionModel': '会话命名',
+      'config.workspaceModel': '工作区命名',
+      'config.modelFollow': '跟随会话（推荐）',
+      'config.modelDefault': '使用 profile 默认模型',
+      'config.modelsHint': '会话命名默认跟随这个会话实际使用的模型；工作区没有自己的模型，只能用默认或指定一个。改动在保存后立即生效。',
       'config.session': '会话命名提示词',
       'config.workspace': '工作区命名提示词',
       'config.hint': '留空即使用内置模板；保存后立即生效，无需重启。',
@@ -58,12 +68,20 @@ window.__ModuleLoader__.load({
       'dialog.workspaceLabel': 'Workspace',
       'dialog.thinking': 'Thinking…',
       'dialog.noIdea': 'Couldn’t think of a better name',
+      'dialog.timeout': 'The model took too long — try again.',
+      'dialog.modelError': 'The model service returned an error',
       'dialog.renaming': 'Renaming…',
       'dialog.renameFailed': 'Rename failed, please try again',
       'dialog.close': 'Close',
       'dialog.untitledSession': 'Untitled session',
       'dialog.untitledWorkspace': 'Untitled workspace',
       'toast.renamed': 'Renamed to ',
+      'config.models': 'Models used for naming',
+      'config.sessionModel': 'Session naming',
+      'config.workspaceModel': 'Workspace naming',
+      'config.modelFollow': 'Follow the session (recommended)',
+      'config.modelDefault': 'Use the profile default',
+      'config.modelsHint': 'Session naming follows the model that session actually runs on. A workspace has no model of its own, so it uses the profile default or a model you pick. Changes apply on save.',
       'config.session': 'Session naming prompt',
       'config.workspace': 'Workspace naming prompt',
       'config.hint': 'Leave empty to use the built-in template. Saves apply immediately, no restart.',
@@ -437,6 +455,16 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    /** Turn a failure code into something the person can act on. */
+    function explainFailure(error, t) {
+      const code = typeof error === 'string' ? error.trim() : ''
+      if (code === 'timeout') return t('dialog.timeout')
+      if (code === '' || code === 'no-candidates' || code === 'no names') return t('dialog.noIdea')
+      if (code === 'no-material' || code === 'too-little-material') return t('dialog.noIdea')
+      const detail = code.length > 140 ? `${code.slice(0, 140)}…` : code
+      return `${t('dialog.modelError')}：${detail}`
+    }
+
     function SmartNameDialog({ request, renameSession, renameWorkspace, closeRequest, showToast, t }) {
       const [state, setState] = useState({ status: 'loading', names: [], error: null })
       const [selectedId, setSelectedId] = useState(request.id)
@@ -492,15 +520,17 @@ window.__ModuleLoader__.load({
               throw new Error('invalid response')
             }
             if (!response.ok || data?.ok !== true || !Array.isArray(data.names) || data.names.length === 0) {
-              throw new Error('no names')
+              throw new Error(typeof data?.error === 'string' && data.error !== '' ? data.error : 'no names')
             }
             return data.names.slice(0, 3)
           })
           .then((names) => {
             if (!cancelled && mountedRef.current) setState({ status: 'done', names, error: null })
           })
-          .catch(() => {
-            if (!cancelled && mountedRef.current) setState({ status: 'error', names: [], error: null })
+          .catch((error) => {
+            if (!cancelled && mountedRef.current) {
+              setState({ status: 'error', names: [], error: String(error?.message ?? '') })
+            }
           })
           .finally(() => clearTimeout(timer))
         return () => {
@@ -601,7 +631,7 @@ window.__ModuleLoader__.load({
           key: 'empty',
           className: 'dsh-smart-namer-status',
           role: 'status',
-        }, t('dialog.noIdea')))
+        }, explainFailure(state.error, t)))
       } else {
         children.push(React.createElement('div', { key: 'names', className: 'dsh-smart-namer-list' },
           state.names.map((name, index) => React.createElement('button', {
@@ -666,6 +696,39 @@ window.__ModuleLoader__.load({
       ])
     }
 
+    const ROW_STYLE = { display: 'flex', alignItems: 'center', gap: 10, fontSize: 13 }
+    const ROW_LABEL_STYLE = { flex: 'none', width: 92, color: 'var(--dsw-alias-label-secondary)' }
+    const SELECT_STYLE = {
+      flex: 1,
+      minWidth: 0,
+      height: 30,
+      padding: '0 8px',
+      border: '1px solid var(--dsw-alias-border-l2)',
+      borderRadius: 8,
+      background: 'var(--dsw-alias-bg-layer-1)',
+      color: 'var(--dsw-alias-label-primary)',
+      font: 'inherit',
+      fontSize: 13,
+    }
+
+    /** Option list for one model picker; keeps an unknown stored value visible. */
+    function buildModelOptions({ options, value, t, withFollow }) {
+      const nodes = []
+      if (withFollow) {
+        nodes.push(React.createElement('option', { key: 'follow', value: 'follow' }, t('config.modelFollow')))
+      }
+      nodes.push(React.createElement('option', { key: 'default', value: 'default' }, t('config.modelDefault')))
+      const known = new Set(['follow', 'default'])
+      for (const option of options) {
+        known.add(option.value)
+        nodes.push(React.createElement('option', { key: option.value, value: option.value }, option.label))
+      }
+      if (value && !known.has(value)) {
+        nodes.push(React.createElement('option', { key: value, value }, value))
+      }
+      return nodes
+    }
+
     const FIELD_STYLE = {
       width: '100%',
       minHeight: 150,
@@ -702,6 +765,9 @@ window.__ModuleLoader__.load({
       const [defaults, setDefaults] = useState({})
       const [notice, setNotice] = useState(null)
       const [saving, setSaving] = useState(false)
+      const [modelOptions, setModelOptions] = useState([])
+      const [sessionModel, setSessionModel] = useState('follow')
+      const [workspaceModel, setWorkspaceModel] = useState('default')
 
       useEffect(() => {
         let alive = true
@@ -716,6 +782,15 @@ window.__ModuleLoader__.load({
           .catch(() => {
             if (alive) setNotice({ kind: 'error', text: t('config.loadFailed') })
           })
+        fetch(MODELS_ROUTE)
+          .then((response) => response.json())
+          .then((data) => {
+            if (!alive || !data?.ok) return
+            setModelOptions(Array.isArray(data.options) ? data.options : [])
+            setSessionModel(data.config?.session || 'follow')
+            setWorkspaceModel(data.config?.workspace || 'default')
+          })
+          .catch(() => {})
         return () => {
           alive = false
         }
@@ -734,6 +809,13 @@ window.__ModuleLoader__.load({
           })
           const data = await response.json().catch(() => ({}))
           if (!response.ok || data?.ok !== true) throw new Error('save failed')
+          const modelResponse = await fetch(MODELS_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ session: sessionModel, workspace: workspaceModel }),
+          })
+          const modelData = await modelResponse.json().catch(() => ({}))
+          if (!modelResponse.ok || modelData?.ok !== true) throw new Error('save failed')
           setNotice({ kind: 'ok', text: t('config.saved') })
         } catch {
           setNotice({ kind: 'error', text: t('config.saveFailed') })
@@ -744,6 +826,30 @@ window.__ModuleLoader__.load({
 
       return React.createElement('div', { style: { display: 'grid', gap: 18 } }, [
         React.createElement('p', { key: 'hint', style: HINT_STYLE }, t('config.hint')),
+        React.createElement('div', { key: 'models', style: { display: 'grid', gap: 8 } }, [
+          React.createElement('div', { key: 'l', style: { fontSize: 13, fontWeight: 500 } }, t('config.models')),
+          React.createElement('label', { key: 'sm', style: ROW_STYLE }, [
+            React.createElement('span', { key: 't', style: ROW_LABEL_STYLE }, t('config.sessionModel')),
+            React.createElement('select', {
+              key: 's',
+              style: SELECT_STYLE,
+              value: sessionModel,
+              disabled: saving,
+              onChange: (event) => setSessionModel(event.target.value),
+            }, buildModelOptions({ options: modelOptions, value: sessionModel, t, withFollow: true })),
+          ]),
+          React.createElement('label', { key: 'wm', style: ROW_STYLE }, [
+            React.createElement('span', { key: 't', style: ROW_LABEL_STYLE }, t('config.workspaceModel')),
+            React.createElement('select', {
+              key: 's',
+              style: SELECT_STYLE,
+              value: workspaceModel,
+              disabled: saving,
+              onChange: (event) => setWorkspaceModel(event.target.value),
+            }, buildModelOptions({ options: modelOptions, value: workspaceModel, t, withFollow: false })),
+          ]),
+          React.createElement('p', { key: 'h', style: HINT_STYLE }, t('config.modelsHint')),
+        ]),
         React.createElement('div', { key: 'session' }, [
           React.createElement('div', { key: 'label', style: { fontSize: 13, fontWeight: 500 } }, t('config.session')),
           React.createElement('p', { key: 'ph', style: HINT_STYLE }, t('config.placeholdersSession')),

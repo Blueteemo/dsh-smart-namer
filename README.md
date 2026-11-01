@@ -59,31 +59,23 @@ dsh plugin --profile desktop add https://github.com/Blueteemo/dsh-smart-namer/re
 
 在输入框里输入 `/rename`，从命令菜单选 `rename`（会显示成命令 chip）：
 
-- `/rename`（无参数）：调用模型，取第一个候选改名，回复「已改为「X」。备选：A、B」；失败或无候选回复「没想出更好的，未改名」，不改名。
+- `/rename`（无参数）：调用模型，取第一个候选改名，回复「已改为「X」。备选：A、B」；失败时按原因回复（响应太慢 / 模型服务异常 / 没想出更好的），不改名。
 - `/rename 突出工具链`：后面的文字作为**偏好提示**传给模型，仍然由模型生成、仍然给 3 个候选。
 
-命令执行沿用 4 秒超时，不启动 Agent 轮次。
+命令执行沿用 20 秒超时，不启动 Agent 轮次。
 
-## 开发
+## 命名用到的素材
 
-```sh
-node --check index.js && node --check client.js   # 语法
-node --test test/*.test.mjs                       # 单元测试（Node.js ≥ 22）
-```
+| 对象 | 素材 |
+|---|---|
+| **会话** | 现有标题、所属项目、项目代号、按阶段均匀采样的 5 条用户发言 |
+| **工作区** | 解码后的文件夹名、代号、最近 5 个会话的标题、最近一条用户发言 |
 
-`index.js` 导出 `apply`、`fill`、`parseNames`、`tidyName` 供测试直接调用。
+不读工具输出、文件内容和完整日志——发给模型的就是上面这些文本。
 
-`client.js` 是浏览器 bundle：宿主按 `?rev=` 做 immutable 缓存并在内存里 memoize，**改完必须完全退出 App（Cmd+Q）再打开**，刷新页面不会重新加载。
+命名用哪个模型：**会话**默认跟随它自己最近一次实际运行的模型；**工作区**没有自己的模型，用 profile 默认。两者都可以在插件配置页改（见下一节）。一次调用，超时 20 秒，不向用户流式输出；失败时会说明是响应太慢、模型服务异常（附上游原文），还是确实没给出可用名字。
 
-### 手工验收
-
-1. 说一句话再点「智能重命名」，4 秒内出候选，选中即改名
-2. 空会话点「智能重命名」：应提示「这个会话还没有内容」，**不是**红色错误
-3. 会话、工作区各改一次，重启 App 后名字仍在
-4. 断网或模型报错：只提示，不改名
-5. 深色、浅色各看一次
-
-## 自定义提示词
+## 自定义提示词与模型
 
 插件页（设置 → 插件 → dsh-smart-namer）的 **Configure** 里有「会话命名提示词」和「工作区命名提示词」两个编辑框：
 
@@ -108,26 +100,7 @@ node --test test/*.test.mjs                       # 单元测试（Node.js ≥ 2
 { "kind": "session", "id": "session-...", "title": "新名字" }
 ```
 
-`kind` 为 `session` 或 `workspace`。会话改名走 `sessionController.rename`（必要时先恢复会话），工作区改名走 `workspaceController.rename`（校验非空和重名）。UI 与会话改名的服务层相同，只是分别从 Client / Host 进入。
-
-## 上下文与模型
-
-- **会话**：现有标题、第一条用户消息、最后一条助手回复。消息从 `sessionQuery.readSurface()` 的当前投影里取纯文本，去掉 Markdown 标记和代码块，各截 200 字。
-- **工作区**：路径、最近 5 个会话的标题、最近一个会话的第一条用户消息（≤200 字）。`sessionQuery.listSessions()` 保证按 `header.createdAt` 最新在前，过滤后直接取前 5。标题从 `sessionQuery.readTitleSnapshots()` 读取。
-- **模型**：`agentDefaultModel.currentSelection()` 的 profile 默认模型；一次调用，`temperature: 0.3`，`maxTokens: 120`，`reasoningEffort: 'off'`（命名是短文案任务；profile 默认 High 推理会吃满 120 token，只出推理不出名字），不重试、不向用户流式输出。调用走宿主 `ctx.llm.stream()`。
-- **提示词填充**：`fill()` 用函数式 replacer 一次替换所有 `{...}`；素材里的 `$&`、`$1`、`$'` 保持字面量，不会被 `String.replace` 当替换模式解释。
-- **解析**：按行切 → trim → 丢空行 → 丢掉与当前标题相同的 → 丢掉超过 12 个汉字的（不截断）→ 去重 → 最多 3 个；0 个视为失败。
-- **超时**：4 秒。超时、模型报错或 0 个候选都只显示「没想出更好的」，不改名。
-
-代码里没有密钥。模型凭据由宿主已有的 LLM 通道解析。
-
-## 不做什么
-
-第一版不做自动触发、批量、缓存、重试、多档上下文、本地启发式清洗、「再想想」和历史记录。
-
-## 验证
-
-在 DSH 0.2.1-rc.5 / profile `desktop` 上实测：弹窗约 1 秒出候选；`/rename` 改名后侧栏同步；8 个单元测试通过。完整记录（含来源校验、持久化位置、失败路径）见 [docs/verification.md](docs/verification.md)。
+`kind` 为 `session` 或 `workspace`。会话改名走 `sessionController.rename`（必要时先恢复会话），工作区改名走 `workspaceController.rename`（校验非空和重名）。
 
 ## 截图
 
@@ -155,19 +128,7 @@ node --test test/*.test.mjs                       # 单元测试（Node.js ≥ 2
 
 ![toast](docs/toast.png)
 
-## 结构
-
-```
-dsh-smart-namer/
-├── index.js            # Host：/rename 命令、HTTP /suggest、rename_target 工具、上下文与模型调用
-├── client.js           # Client：两个菜单项、工作区下拉弹窗、toast
-├── cordis.patch.yml    # 插件行
-├── package.json        # npm 包 + dsh.bundle + dsh.client
-├── locale/{zh,en}.json # 插件管理器的标题/描述
-├── test/               # 单元测试（node --test）
-├── icon.svg            # 插件图标（assets/ 里是 180px 位图）
-└── docs/               # 截图 + 验证记录
-```
+参与开发（跑测试、目录结构、提交流程）见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## License
 
